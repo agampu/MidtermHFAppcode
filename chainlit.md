@@ -2,8 +2,8 @@
 
 
 - A public (or otherwise shared) link to a GitHub repo that contains:
-  - A 5-minute (or less) Loom video of a live demo of your application that also describes the use case.
-  - A written document addressing each deliverable and answering each question.
+  - Link to A 5-minute (or less) Loom video of a live demo of your application that also describes the use case.
+  - A written document addressing each deliverable and answering each question. (README on hugging face)
   - All relevant code.
 - A public (or otherwise shared) link to the final version of your public application on Hugging Face (or other).
 - A public link to your fine-tuned embedding model on Hugging Face.
