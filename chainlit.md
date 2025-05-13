@@ -84,6 +84,7 @@ Build an end-to-end RAG application using an industry-standard open-source stack
 **Deliverables:**
 
 - Build an end-to-end prototype and deploy it to a Hugging Face Space (or other endpoint).
+![Conceptual Flow of Agentic RAG](ConceptualFlow.png)
 
 ---
 

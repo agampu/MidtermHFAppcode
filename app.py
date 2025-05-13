@@ -33,6 +33,12 @@ from langchain_qdrant import Qdrant # Langchain's interface to Qdrant
 from qdrant_client.http.models import Distance, VectorParams
 from qdrant_client import QdrantClient
 
+from sentence_transformers import SentenceTransformer
+from langchain_community.embeddings import HuggingFaceEmbeddings
+# from qdrant_client import Distance
+from qdrant_client.models import VectorParams
+from langchain_community.vectorstores import Qdrant
+
 from langchain_openai import OpenAIEmbeddings
 
 from lang_state import CreativeWriterAssistantState
@@ -65,8 +71,16 @@ if not all_parsed_documents:
 
 # --- INITIALIZE EMBEDDINGS MODEL ---
 # print(f"\n--- Step 2: Initializing Embeddings Model ---") # Dev print
-EMBEDDING_MODEL_NAME = "text-embedding-3-small" # Choose your embedding model
-embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL_NAME) # Requires OPENAI_API_KEY
+# Get models/finetuned_all-MiniLM-L6-v2_20250511_235648 from hugging face. and change VECTOR_DIMENSION BELOW.
+#EMBEDDING_MODEL_NAME = "text-embedding-3-small" # Choose your embedding model
+#embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL_NAME) # Requires OPENAI_API_KEY
+#EMBEDDING_MODEL_NAME = "geetach/prompt-retrieval-midterm-finetuned"
+EMBEDDING_MODEL_NAME = "geetach/finetuned-prompt-retriever"
+embeddings = HuggingFaceEmbeddings(
+    model_name=EMBEDDING_MODEL_NAME,
+    model_kwargs={'device': 'mps'},  # Use 'cuda' for GPU, 'cpu' for CPU, 'mps' for M1/M2 Mac
+    encode_kwargs={'normalize_embeddings': True}  # Ensures cosine similarity works correctly
+)
 
 # --- SETUP QDRANT CLIENT ---
 # print(f"\n--- Step 3: Setting up Qdrant Client ---") # Dev print
@@ -75,7 +89,8 @@ qdrant_client = QdrantClient(":memory:") # In-memory DB; for persistent, use URL
 # --- DEFINE AND ENSURE QDRANT COLLECTION ---
 # print(f"\n--- Step 4 & 5: Ensuring Qdrant Collection ---") # Dev print
 PROMPT_COLLECTION_NAME = "creative_writing_prompts_v1" # Unique name for this dataset
-VECTOR_DIMENSION = 1536 # Must match embedding model's output dimensions (e.g., 1536 for text-embedding-3-small)
+VECTOR_DIMENSION = 384  # all-MiniLM-L6-v2 outputs 384-dimensional vectors
+# VECTOR_DIMENSION = 1536 # Must match embedding model's output dimensions (e.g., 1536 for text-embedding-3-small)
 
 try:
     qdrant_client.get_collection(collection_name=PROMPT_COLLECTION_NAME) # Check if exists
@@ -107,10 +122,10 @@ else:
 
 
 # --- CREATE RETRIEVER ---
-# print(f"\n--- Step 8: Creating Retriever ---") # Dev print
+print(f"\n--- Step 8: Creating Retriever ---") # Dev print
 retriever = vector_store.as_retriever(
     search_type="similarity", # Standard semantic search
-    search_kwargs={"k": 1}    # Retrieve top 5 most similar prompts
+    search_kwargs={"k": 1}    # Retrieve top  similar prompts
 )
 # print("Retriever created. Qdrant setup complete.") # Dev print
 
@@ -236,8 +251,8 @@ async def run_guide_llm(state: CreativeWriterAssistantState) -> CreativeWriterAs
     if explicitly_confirmed_by_ai:
         print(f"Guide LLM: Detected '{is_complete_signal_phrase}' in AI utterance.")
         user_facing_response_to_send = final_ai_utterance_for_user.replace(is_complete_signal_phrase, "").strip()
-        if not user_facing_response_to_send: 
-            user_facing_response_to_send = "Okay, I have a good understanding now." # Generic if only signal
+        # If the response is empty after removing the signal, don't send any message
+        # The transition message will be sent later
 
     # Send the AI's actual final conversational response to the user *only if we are not forcing completion yet*
     # and if there's something to send. If forcing completion, the transition message comes later.
@@ -277,10 +292,8 @@ async def run_guide_llm(state: CreativeWriterAssistantState) -> CreativeWriterAs
             state['user_writing_interest'] = user_interest_summary
             state['current_step_name'] = "query_formulator_llm"
             
-            # Send the transition message *after* summarization
-            transition_message = f"Understood. I'll use '{user_interest_summary}' to find a relevant prompt for you now."
-            await cl.Message(content=transition_message).send()
-            print(f"Guide LLM: Sent explicit transition message.")
+            # No transition message needed - the acknowledgment was sufficient
+            print(f"Guide LLM: Proceeding to query formulation.")
         except Exception as e:
             print(f"Error during summarization in Guide LLM: {e}")
             await cl.Message(content="I had a bit of trouble summarizing our chat. Let's try again with your interest.").send()
@@ -359,15 +372,20 @@ async def retrieve_prompt_from_qdrant(state: CreativeWriterAssistantState) -> Cr
 async def run_augmentor_llm(state: CreativeWriterAssistantState) -> CreativeWriterAssistantState:
     print("--- NODE: run_augmentor_llm ---")
     retrieved_doc = state.get("retrieved_prompt_document")
+    user_interest = state.get("user_writing_interest")
+    
     if not retrieved_doc:
         state['error_message'] = "Augmentor LLM: Missing retrieved prompt document."
         state['current_step_name'] = "ERROR_STATE"
         return state
 
+    # Send loading message before starting the augmentation
+    loading_msg = await cl.Message(content="Constructing a prompt for you...").send()
+
     prompt_text = retrieved_doc.page_content
     messages = [
         SystemMessage(content=AUGMENTOR_SYSPROMPT),
-        HumanMessage(content=f"The writing prompt is: {prompt_text}")
+        HumanMessage(content=f"The writing prompt is: {prompt_text}\n\nUser's stated interest: {user_interest}")
     ]
     try:
         print(f"Augmentor LLM: Invoking llm_catalyst with prompt: '{prompt_text[:100]}...'")
@@ -377,8 +395,13 @@ async def run_augmentor_llm(state: CreativeWriterAssistantState) -> CreativeWrit
         state['prompt_augmentation_text'] = augmentation_text
         state['current_step_name'] = "present_and_await_writing"
         state['error_message'] = None
+
+        # Remove loading message after we have the augmentation
+        await loading_msg.remove()
     except Exception as e:
         print(f"Error in Augmentor LLM: {e}")
+        # Remove loading message if there was an error
+        await loading_msg.remove()
         state['error_message'] = f"Augmentor LLM failed: {e}"
         state['current_step_name'] = "ERROR_STATE"
     return state
@@ -391,33 +414,57 @@ async def present_and_await_writing(state: CreativeWriterAssistantState) -> Crea
     if not retrieved_doc:
         state['error_message'] = "Display Error: No prompt was available to show."
         state['current_step_name'] = "ERROR_STATE"
-        # No direct cl.Message here, router will send to ERROR_NODE which will send message
         return state
 
-    prompt_name = retrieved_doc.metadata.get('prompt_name', 'A Creative Prompt')
-    genre = retrieved_doc.metadata.get('genre', 'N/A')
-    theme = retrieved_doc.metadata.get('theme', 'N/A')
-    prompt_text = retrieved_doc.page_content
+    # Check if augmentation contains a new prompt
+    if augmentation and "**Prompt:**" in augmentation:
+        # Split augmentation into prompt and what-if question
+        parts = augmentation.split("\n\nWhat if ")
+        new_prompt = parts[0].strip()
+        what_if = "What if " + parts[1].strip() if len(parts) > 1 else ""
+        
+        # Extract prompt details from the new prompt
+        prompt_lines = new_prompt.split("\n")
+        prompt_name = prompt_lines[0].replace("**Prompt:**", "").strip()
+        genre_theme = prompt_lines[1].replace("**Genre:**", "").replace("**Theme:**", "").strip()
+        prompt_text = "\n".join(prompt_lines[2:]).strip()
+        
+        message_parts = [
+            f"Okay, here's a prompt idea for your consideration:",
+            f"**{prompt_name}**",
+            f"*{genre_theme}*",
+            f"\n{prompt_text}"
+        ]
+        if what_if:
+            message_parts.extend([
+                "\n✨ To get your ideas flowing, consider this: ✨",
+                what_if
+            ])
+    else:
+        # Use original prompt
+        prompt_name = retrieved_doc.metadata.get('prompt_name', 'A Creative Prompt')
+        genre = retrieved_doc.metadata.get('genre', 'N/A')
+        theme = retrieved_doc.metadata.get('theme', 'N/A')
+        prompt_text = retrieved_doc.page_content
 
-    message_parts = [
-        f"Okay, here's a prompt idea for your consideration:",
-        "--------------------------------------------------",
-        f"**Prompt:** {prompt_name}",
-        f"**Genre:** {genre} | **Theme:** {theme}",
-        f"\n{prompt_text}",
-        "--------------------------------------------------"
-    ]
-    if augmentation:
-        message_parts.extend([
-            "\n✨ To get your ideas flowing, consider this: ✨",
-            augmentation
-        ])
+        message_parts = [
+            f"Okay, here's a prompt idea for your consideration:",
+            f"**{prompt_name}**",
+            f"*{genre} | {theme}*",
+            f"\n{prompt_text}"
+        ]
+        if augmentation:
+            message_parts.extend([
+                "\n✨ To get your ideas flowing, consider this: ✨",
+                augmentation
+            ])
+    
     message_parts.append("\nWhen you have engaged with the prompt and written something (even a short piece!), please share it below. If you'd rather skip providing text for feedback, just type 'skip'.")
     
     await cl.Message(content="\n".join(message_parts)).send()
     print("Present & Await: Sent prompt and augmentation to user. Waiting for their writing.")
     
-    state['current_step_name'] = "AWAITING_USER_WRITTEN_TEXT" # Signal to on_message
+    state['current_step_name'] = "AWAITING_USER_WRITTEN_TEXT"
     state['error_message'] = None
     return state
 
