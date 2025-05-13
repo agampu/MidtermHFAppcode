@@ -78,7 +78,7 @@ if not all_parsed_documents:
 EMBEDDING_MODEL_NAME = "geetach/finetuned-prompt-retriever"
 embeddings = HuggingFaceEmbeddings(
     model_name=EMBEDDING_MODEL_NAME,
-    model_kwargs={'device': 'mps'},  # Use 'cuda' for GPU, 'cpu' for CPU, 'mps' for M1/M2 Mac
+    model_kwargs={},  # Let sentence-transformers auto-detect device (cuda or cpu)
     encode_kwargs={'normalize_embeddings': True}  # Ensures cosine similarity works correctly
 )
 
